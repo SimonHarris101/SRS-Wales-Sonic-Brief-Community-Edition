@@ -25,11 +25,11 @@ Sonic Brief SRS requires **three** Entra ID App Registrations to implement secur
 1. Navigate to **Azure Portal** > **Microsoft Entra ID** > **App registrations**
 2. Click **+ New registration**
 3. Configure the registration:
-   - **Name**: `Sonic-Brief-Backend-API` (or environment-specific name)
-   - **Supported account types**:
-     - **Single tenant** (recommended): Accounts in this organizational directory only
-     - **Multi-tenant** (if needed): Accounts in any organizational directory
-   - **Redirect URI**: Leave blank for now
+    - **Name**: `Sonic-Brief-Backend-API` (or environment-specific name)
+    - **Supported account types**:
+       - **Single tenant** (recommended): Accounts in this organizational directory only
+       - **Multi-tenant** (if needed): Accounts in any organizational directory
+    - **Redirect URI**: Leave blank for now; you will optionally add backend OAuth redirect URIs later if using App Service Authentication.
 4. Click **Register**
 
 ### Step 2: Expose an API
@@ -57,6 +57,26 @@ Copy and securely store:
 - **Directory (tenant) ID**: `{tenant-id}`
 - **Application ID URI**: `api://{backend-client-id}` or custom URI
 - **Scope**: value of `azure_backend_scope` (e.g., `api://{backend-client-id}/user_impersonation`)
+
+### Step 5: (Optional) Configure Backend Redirect URIs for App Service Authentication
+
+If you enable **Authentication / Authorization (EasyAuth)** on the backend App Service and use Entra ID for login flows through the backend, configure additional redirect URIs on the **backend API app registration**:
+
+1. Go to the backend app registration > **Authentication**.
+2. Under **Web** (or **Single-page application**, depending on your flow), add redirect URIs such as:
+   - `https://<your-backend-app>.azurewebsites.net` (root backend URL)
+   - `https://<your-backend-app>.azurewebsites.net/auth/callback`
+   - `https://<your-frontend-host>`
+   - `https://<your-frontend-host>/redirect`
+
+These URIs correspond to:
+
+- The public URL of the backend (`https://<your-backend-app>.azurewebsites.net`).
+- The plain backend URL (no path) used by some flows as a reply URL.
+- A backend callback path used by EasyAuth or OAuth middleware (`/auth/callback`).
+- A frontend origin and redirect helper endpoint (for example, `/redirect`) hosted on the same origin as your SPA.
+
+> The exact hostnames will differ per environment, but the **paths** `/auth/callback` and `/redirect` should be preserved when configuring redirect URIs for the backend login and logout flows.
 
 ---
 
@@ -238,6 +258,32 @@ azure_audience                   = "api://{backend-client-id}"
 azure_backend_scope              = "api://{backend-client-id}/user_impersonation" # or access_as_user if standardized
 service_principal_upload_role    = "<your-role-value>" # align with backend & app role value
 ```
+
+---
+
+## Part 5: Assigning Users via Entra Groups
+
+To control who can sign in to Sonic Brief, use Entra security or Microsoft 365 groups and Enterprise Application assignments rather than granting access to "All users" by default.
+
+### Step 1: Create an Access Group
+
+1. In **Microsoft Entra ID** > **Groups** > **New group**.
+2. Group type: **Security** (or **Microsoft 365**, following your organization’s standards).
+3. Name: a clear, environment-specific name such as `Sonic-Brief-Users-Prod`.
+4. Add your initial users (or other groups) as members.
+
+### Step 2: Assign the Group to the Enterprise Applications
+
+For each of the **frontend SPA** and **backend API** apps:
+
+1. Go to **Microsoft Entra ID** > **Enterprise applications**.
+2. Open the Enterprise Application corresponding to your frontend or backend app registration.
+3. Under **Users and groups**:
+   - (Optional but recommended) Enable **Assignment required** so only assigned users/groups can sign in.
+   - Click **+ Add user/group** and select the access group created in Step 1.
+4. Save the assignment.
+
+This ensures only members of the designated group(s) can authenticate to Sonic Brief, while the app registrations, scopes, and permissions remain reusable across environments.
 
 ---
 

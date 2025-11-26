@@ -26,7 +26,7 @@ Comprehensive checklist for deploying a new SRS instance of Sonic Brief into a *
 | Platform | Web/API (expose API) | SPA / Single Page Application |
 | Expose API | Application ID URI (e.g., `api://<backend-client-id>`) | N/A |
 | Scope | `user_impersonation` (add description, enabled) | Add as delegated permission (API Permissions) |
-| Redirect URIs | (If interactive tools) optional | Frontend URL(s): local dev + deployed SWA |
+| Redirect URIs | Optional Web/SPA URIs for backend auth flows (see note) | Frontend URL(s): local dev + deployed SWA |
 | Certificates & Secrets | Not required for implicit MSAL SPA | None |
 | Token Config | (Optional) Add groups/roles claims if needed | N/A |
 
@@ -37,26 +37,25 @@ Record:
 * Audience / App ID URI
 * Scope full string: `api://<backend-client-id>/user_impersonation`
 
+> **Backend Redirect URIs (when using App Service Authentication):** In addition to the frontend SPA redirects, configure the backend API app registration with Web/SPA redirect URIs that match your backend and frontend hosts, including **both** the plain host and the paths `/auth/callback` and `/redirect` (for example: `https://<backend-app>.azurewebsites.net`, `https://<backend-app>.azurewebsites.net/auth/callback`, `https://<frontend-host>` and `https://<frontend-host>/redirect`). These are used by EasyAuth / OAuth flows to complete sign-in and redirect the user back to the SPA.
+
 ## 3. Prepare Terraform Variables
-Create `terraform.tfvars` (or use `.auto.tfvars`) based on `infra/variables.tf.sample`:
-```
-subscription_id              = "<new-sub-id>"
-environment                  = "dev-srs"
-prefix                       = "srs-"         # avoid collisions
-azure_tenant_id              = "<tenant-guid>"
-azure_client_id              = "<backend-app-guid>"
-azure_frontend_client_id     = "<frontend-app-guid>"
-azure_audience               = "api://<backend-app-guid>"
-azure_backend_scope          = "api://<backend-app-guid>/<user_impersonation_scope>"
-frontend_static_hostname     = "placeholder-static-host.auto.azurestaticapps.net"
-auth_method                  = "entra"         # do not default to both
-job_retention_days           = 15
-blob_receipt_retention_days  = 15
-openai_location              = "swedencentral" # confirm quota
-voice_location               = "northeurope"   # confirm latency
+Create `terraform.tfvars` (or use `.auto.tfvars`) based on `infra/terraform..tfvars.sample`:
+
+```hcl
+# Required
+subscription_id = "<new-sub-id>"
+
+# Transcription model selection (matches variables.tf default)
+transcription_model = "AZURE_AI_SPEECH"  # or "gpt-4o" if using GPT-4o audio
+
+# Environment-specific overrides
+allow_origins        = "https://your-static-web-app.azurestaticapps.net"
+backend_log_level    = "INFO"
+enable_swagger_oauth = false
 ```
 
-> Ensure **all** globally unique names (storage, static web app, openai service, etc.) are derived from `prefix + environment` to avoid collisions.
+> Start with `terraform..tfvars.sample` as your template and update only the values you need per environment (subscription ID, static web app origin, logging level, swagger OAuth toggle, and transcription model if different from the default).
 
 ## 4. Terraform Apply Order (if splitting state)
 If using a single state file, a single `terraform apply` is sufficient. If modularizing:
@@ -65,6 +64,81 @@ If using a single state file, a single `terraform apply` is sufficient. If modul
 3. OpenAI + Speech
 4. Function App + App Service (backend)
 5. Static Web App
+
+## 4.1 Pre-Terraform Backend Setup (Remote State)
+
+If you use a remote state backend (recommended for shared/production environments), you must create the **Terraform state resource group, storage account, and container** *before* running `terraform init` in `infra/`.
+
+The pattern used by the original deployment is:
+
+1. **Login to Azure** (if not already logged in):
+
+  ```powershell
+  az login
+  ```
+
+2. **Create the resource group named `terraform`** (to hold the state storage account):
+
+  ```powershell
+  az group create --name terraform --location eastus
+  ```
+
+3. **Create the storage account and `tfstate` container**:
+
+  For Windows PowerShell (uncomment and run):
+
+  ```powershell
+  $RANDOM_SUFFIX = [System.Guid]::NewGuid().ToString().Substring(0,4)
+
+  # Create the storage account with random suffix
+  $STORAGE_ACCOUNT = "terraform$RANDOM_SUFFIX"
+  echo "Creating storage account: $STORAGE_ACCOUNT"
+  az storage account create --name $STORAGE_ACCOUNT --resource-group terraform --sku Standard_LRS --encryption-services blob
+  $ACCOUNT_KEY = az storage account keys list --resource-group terraform --account-name $STORAGE_ACCOUNT --query '[0].value' -o tsv
+
+  # Create the container named 'tfstate'
+  az storage container create --name tfstate --account-name $STORAGE_ACCOUNT --account-key $ACCOUNT_KEY
+
+  echo "Storage account created: $STORAGE_ACCOUNT"
+  ```
+
+  For Linux/macOS shells (bash/zsh):
+
+  ```bash
+  RANDOM_SUFFIX=$(cat /dev/urandom | tr -dc 'a-z0-9' | fold -w 4 | head -n 1)
+
+  STORAGE_ACCOUNT="terraform${RANDOM_SUFFIX}"
+  echo "Creating storage account: $STORAGE_ACCOUNT"
+  az storage account create --name $STORAGE_ACCOUNT --resource-group terraform --sku Standard_LRS --encryption-services blob
+  ACCOUNT_KEY=$(az storage account keys list --resource-group terraform --account-name $STORAGE_ACCOUNT --query '[0].value' -o tsv)
+
+  az storage container create --name tfstate --account-name $STORAGE_ACCOUNT --account-key $ACCOUNT_KEY
+
+  echo "Storage account created: $STORAGE_ACCOUNT"
+  ```
+
+4. **Configure the Terraform backend** in `infra/backend.tf` (copy from `backend.tf.sample` and replace placeholders):
+
+  ```hcl
+  terraform {
+    backend "azurerm" {
+     resource_group_name  = "terraform"              # RG holding the remote state storage account
+     storage_account_name = "<your-terraform-storage-account-name>"  # e.g. terraformabcd (must exist)
+     container_name       = "tfstate"                # Must exist within the storage account
+     key                  = "<env>.tfstate"          # Unique key per environment (dev/test/prod)
+     # use_azuread_auth   = true                      # Optional: use Azure AD auth instead of access keys
+    }
+  }
+  ```
+
+5. **Re-initialize Terraform** from the `infra/` folder so it picks up the remote backend:
+
+  ```powershell
+  cd infra
+  terraform init -reconfigure
+  ```
+
+After this one-time setup, subsequent `terraform plan`/`terraform apply` commands will read and write state to the `terraform` RG’s storage account instead of using local state files.
 
 ## 5. Post-Provision Role Assignments
 | Principal | Resource | Role | Why |
@@ -79,7 +153,8 @@ Validate via Portal or CLI (ARG queries) that assignments exist.
 ## 6. Configure Frontend
 After first SWA deploy Azure assigns a hostname. Update:
 * `frontend_static_hostname` variable (for subsequent applies)
-* CORS origins in backend & function app (if not wildcard, ensure SWA domain present)
+* `allow_origins` in `infra/terraform.tfvars` to the exact SWA origin (no trailing slash)
+* Ensure platform-level CORS (App Service “CORS” blade) does not contradict the app-level `ALLOW_ORIGINS` setting
 
 ## 7. Application Settings (Runtime Drift Watchlist)
 Ensure the following Terraform-provisioned settings match portal runtime:
@@ -93,11 +168,11 @@ Ensure the following Terraform-provisioned settings match portal runtime:
 
 ## 8. Deployment Steps (End-to-End)
 1. `terraform init && terraform apply` (confirm output endpoints)
-2. Build & deploy backend (CI/CD or manual zip)
-3. Package & deploy functions (zip or func deploy)
+2. Build & deploy backend (CI/CD or Terraform-driven `backend.zip`)
+3. Package & deploy functions (Terraform-driven `az-func-audio.zip`)
 4. Build frontend & deploy to SWA (`swa deploy` or GitHub Action)
 5. Update SWA hostname variable & re-apply Terraform (so backend CORS stays consistent)
-6. Smoke test: login (MSAL), upload audio, observe transcription & summary, retention dry-run logs.
+6. Smoke test: login (MSAL), call `/auth/me`, upload audio, observe transcription & summary, retention dry-run logs.
 
 ## 8.1. Manual Deployment Fallback (When Terraform Doesn't Deploy Code)
 
@@ -114,51 +189,66 @@ Before running manual deployment commands:
 ### Deploy Backend API
 
 ```bash
-# Navigate to infra folder to ensure zip files are generated
+# From the repo root 
 cd infra
 
-# Run terraform to generate zip files (if not already done)
+# Ensure zip package exists (Terraform's archive_file will build backend.zip)
 terraform init
 terraform plan
 
-# Deploy backend using Azure CLI
-az webapp deployment source config-zip \
+# Deploy backend using modern OneDeploy (zip) API
+az webapp deploy \
   --resource-group <resource-group-name> \
   --name <backend-app-service-name> \
-  --src backend.zip
+  --type zip \
+  --src-path backend.zip \
+  --timeout 1200
 ```
 
 **Example:**
 
 ```bash
-az webapp deployment source config-zip \
+az webapp deploy \
   --resource-group myorg-sb-v2t-dev-v2-accelerator-rg \
   --name myorg-sb-v2t-dev-v2-echo-brief-backend-api-xxxx \
-  --src backend.zip
+  --type zip \
+  --src-path backend.zip \
+  --timeout 1200
 ```
+
+> **Note:** `backend.zip` is generated by Terraform from the `backend_app` folder via the `archive_file` data source and is also used by Terraform’s `null_resource` to perform automated zip deploys during `terraform apply`. If `terraform plan` fails, fix plan errors before attempting manual deployment.
 
 ### Deploy Function App
 
 ```bash
-# Deploy function app using Azure CLI (from infra folder)
-az functionapp deployment source config-zip \
-  --subscription <subscription-id> \
+# From the repo root 
+cd infra
+
+# Ensure az-func-audio.zip exists via Terraform
+terraform init
+terraform plan
+
+# Deploy function app using modern OneDeploy (zip) API
+az webapp deploy \
   --resource-group <resource-group-name> \
   --name <function-app-name> \
-  --src az-func-audio.zip \
-  --build-remote true
+  --type zip \
+  --src-path az-func-audio.zip \
+  --timeout 1200
 ```
 
 **Example:**
 
 ```bash
-az functionapp deployment source config-zip \
-  --subscription 12345678-1234-1234-1234-123456789012 \
+az webapp deploy \
   --resource-group myorg-sb-v2t-dev-v2-accelerator-rg \
   --name myorg-sb-v2t-dev-v2-audio-processor-xxxx \
-  --src az-func-audio.zip \
-  --build-remote true
+  --type zip \
+  --src-path az-func-audio.zip \
+  --timeout 1200
 ```
+
+> **Note:** Although this is an Azure Function App, the underlying platform is the same App Service and supports `az webapp deploy` for zip (OneDeploy) deployments. The zip content is produced from the `az-func-audio` folder via Terraform's `archive_file` data source and is also used by Terraform’s `null_resource` to perform automated zip deploys during `terraform apply`.
 
 ### Deploy Frontend (Static Web App)
 
@@ -266,6 +356,7 @@ After manual deployment, verify:
 * [ ] Structured logs visible in Log Analytics.
 * [ ] No legacy auth endpoints reachable (if disabled).
 * [ ] Frontend displays correct environment name & retention days.
+* [ ] Confirm the appropriate Entra security/M365 group(s) are assigned to the frontend and backend Enterprise Applications (and that **Assignment required** is enabled if you are restricting access).
 
 ## 11. Base vs SRS Differentiators Summary
 

@@ -1,9 +1,17 @@
 # Variables
 subscription_id = "xxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
 
-# Retention Policy Configuration (Optional - defaults provided)
-# job_retention_days = 14                    # Days to retain completed jobs
-# failed_job_retention_days = 14             # Days to retain failed jobs  
-# retention_dry_run = true                   # true = log only, false = actually delete
-# enable_automatic_retention = true          # Enable automatic retention cleanup
-# retention_batch_size = 100                 # Batch size for retention operations
+# Transcription Model Configuration (Optional)
+# Use "AZURE_AI_SPEECH" for Azure Speech Service (recommended for OWD structure)
+# Use "gpt-4o" for GPT-4o audio transcription (requires local file download)
+transcription_model = "AZURE_AI_SPEECH"
+
+# Optional overrides / environment settings
+# Comma-separated CORS origins (adjust to actual static web app hostname when known)
+allow_origins       = "https://your-static-web-app.azurestaticapps.net"
+backend_log_level   = "INFO"
+enable_swagger_oauth = false
+
+# Note: Retention-related variables (job_retention_days, failed_job_retention_days, etc.)
+# are defined with sane defaults in variables.tf and normally do not need to be
+# overridden in terraform.tfvars.
